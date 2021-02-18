@@ -18,6 +18,7 @@ dependencies {
     testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.6.0")
     //
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-core:1.0.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.0.1")
 }
 
 tasks.test {
