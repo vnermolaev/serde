@@ -1,19 +1,16 @@
-@file:UseSerializers(PublicKeyAsSurrogate::class)
+// @file:UseSerializers(PublicKeyAsSurrogate::class)
+@file:UseSerializers(PKSerde::class)
 
 import kotlinx.serialization.*
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.builtins.ListSerializer
-import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.descriptors.*
 import kotlinx.serialization.encoding.*
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.modules.*
 import sun.security.rsa.RSAPublicKeyImpl
 import java.io.*
 import java.security.KeyPairGenerator
 import java.security.PublicKey
 import java.security.SecureRandom
-import kotlin.random.Random
 
 class DataOutputEncoder(val output: DataOutput) : AbstractEncoder() {
     private val baSerializer = serializer<ByteArray>()
@@ -103,10 +100,10 @@ inline fun <reified T> decodeFrom(input: DataInput): T = decodeFrom(input, seria
 
 //////////////////////
 @Serializable
-data class User(val pk: PublicKey)
+data class User(val id: PublicKey)
 
 @Serializable
-data class GenericUser<U>(val p: Pair<Int, U>)
+data class GenericUser<U>(val id: U)
 
 inline fun <reified T> test(
     data: T,
@@ -140,21 +137,22 @@ inline fun <reified T> test(
 
 fun main() {
     // Generate some public key
-    val pk = getPk()
+    val pk = getRSA()
 
     // Simple inclusion of a public key
     val u = User(pk)
     test(u)
 
     // Inclusion of PublicKey as a generic
-    val gu = GenericUser(Pair(1, pk))
-    // TODO: this does not work without specifying a serde strategy.
-    test(gu, GenericUser.serializer(PublicKeyAsSurrogate))
+    val gu = GenericUser(pk)
+    // TODO: this only works with specifying a serde strategy.
+    // test(gu, GenericUser.serializer(PKSerde))
     // TODO: explicit typing does not help
     // test<GenericUser<PublicKey>>(gu)
+    test(gu)
 }
 
-fun getPk(): PublicKey {
+fun getRSA(): PublicKey {
     val generator = KeyPairGenerator.getInstance("RSA")
     generator.initialize(2048, SecureRandom())
     return generator.genKeyPair().public
@@ -162,18 +160,33 @@ fun getPk(): PublicKey {
 
 // Implement a PublicKey surrogate and respective serde.
 @Serializable
-data class PublicKeySurrogate(val encoded: ByteArray)
-
-object PublicKeyAsSurrogate: KSerializer<PublicKey> {
-    override val descriptor: SerialDescriptor = PublicKeySurrogate.serializer().descriptor
-
-    override fun deserialize(decoder: Decoder): PublicKey {
-        val surrogate = decoder.decodeSerializableValue(PublicKeySurrogate.serializer())
-        return RSAPublicKeyImpl(surrogate.encoded)
+class PKSurrogate(val kind: KeyKind, val encoded: ByteArray) {
+    enum class KeyKind {
+        RSA
     }
 
+    companion object {
+        fun RSA(key: PublicKey) = PKSurrogate(KeyKind.RSA, key.encoded)
+    }
+}
+
+
+object PKSerde: KSerializer<PublicKey> {
+    private val strategy = PKSurrogate.serializer()
+    override val descriptor: SerialDescriptor = strategy.descriptor
+
     override fun serialize(encoder: Encoder, value: PublicKey) {
-        val surrogate = PublicKeySurrogate(value.encoded)
-        encoder.encodeSerializableValue(PublicKeySurrogate.serializer(), surrogate)
+        val surrogate = when (value) {
+            is RSAPublicKeyImpl -> PKSurrogate.RSA(value)
+            else -> error("sad")
+        }
+        encoder.encodeSerializableValue(strategy, surrogate)
+    }
+
+    override fun deserialize(decoder: Decoder): PublicKey {
+        val surrogate = decoder.decodeSerializableValue(strategy)
+        return when (surrogate.kind) {
+            PKSurrogate.KeyKind.RSA -> RSAPublicKeyImpl(surrogate.encoded)
+        }
     }
 }
