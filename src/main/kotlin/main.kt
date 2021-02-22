@@ -2,15 +2,32 @@
 // @file:UseSerializers(ListSerde::class)
 // @file:UseSerializers(RSAPublicKeyImplSerde::class)
 
-import kotlinx.serialization.*
+import kotlinx.serialization.DeserializationStrategy
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.builtins.ListSerializer
-import kotlinx.serialization.builtins.serializer
-import kotlinx.serialization.descriptors.*
-import kotlinx.serialization.encoding.*
-import kotlinx.serialization.modules.*
+import kotlinx.serialization.SerializationStrategy
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.descriptors.buildClassSerialDescriptor
+import kotlinx.serialization.descriptors.element
+import kotlinx.serialization.encoding.AbstractDecoder
+import kotlinx.serialization.encoding.AbstractEncoder
+import kotlinx.serialization.encoding.CompositeDecoder
+import kotlinx.serialization.encoding.CompositeEncoder
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.modules.SerializersModule
+import kotlinx.serialization.modules.polymorphic
+import kotlinx.serialization.serializer
 import sun.security.rsa.RSAPublicKeyImpl
-import java.io.*
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.DataInput
+import java.io.DataInputStream
+import java.io.DataOutput
+import java.io.DataOutputStream
 import java.security.KeyPairGenerator
 import java.security.PublicKey
 import java.security.SecureRandom
@@ -19,19 +36,36 @@ import java.util.Date
 
 class LW<T>(val list: List<T>)
 
+@Serializable
+@SerialName("RSAPublicKeyImpl")
+private class RSAPublicKeySurrogate(val encoded: ByteArray)
+
+
+object RSAPublicKeySerializer : KSerializer<RSAPublicKeyImpl> {
+    override val descriptor = RSAPublicKeySurrogate.serializer().descriptor
+
+    override fun serialize(encoder: Encoder, value: RSAPublicKeyImpl) {
+        encoder.encodeSerializableValue(
+            RSAPublicKeySurrogate.serializer(),
+            RSAPublicKeySurrogate(value.encoded)
+        )
+    }
+
+    override fun deserialize(decoder: Decoder): RSAPublicKeyImpl {
+        val surrogate = decoder.decodeSerializableValue(RSAPublicKeySurrogate.serializer())
+        return RSAPublicKeyImpl(surrogate.encoded)
+    }
+}
+
+
 class DataOutputEncoder(val output: DataOutput, val totalLength: Int = 10) : AbstractEncoder() {
     private val baSerializer = serializer<ByteArray>()
 
-    override val serializersModule: SerializersModule = EmptySerializersModule
-    // override val serializersModule: SerializersModule = SerializersModule {
-    //     polymorphic(PublicKey::class, PKSerde) {
-    //         subclass(RSAPublicKeyImpl::class, RSAPublicKeyImplSerde)
-    //     }
-    // }
-    //     polymorphic(PublicKey::class) {
-    //         subclass(RSAPublicKeyImpl::class, RSAPublicKeyImplSerde)
-    //     }
-    // }
+    override val serializersModule = SerializersModule {
+        polymorphic(PublicKey::class) {
+            subclass(RSAPublicKeyImpl::class, RSAPublicKeySerializer)
+        }
+    }
 
     override fun encodeBoolean(value: Boolean) = output.writeByte(if (value) 1 else 0)
     override fun encodeByte(value: Byte) = output.writeByte(value.toInt())
@@ -69,7 +103,7 @@ fun <T> encodeTo(output: DataOutput, serializer: SerializationStrategy<T>, value
     encoder.encodeSerializableValue(serializer, value)
 }
 
-inline fun <reified T> encodeTo(output: DataOutput, value: T){
+inline fun <reified T> encodeTo(output: DataOutput, value: T) {
     val serializer = serializer<T>()
     encodeTo(output, serializer, value)
 }
@@ -79,7 +113,11 @@ class DataInputDecoder(val input: DataInput, var elementsCount: Int = 0) : Abstr
 
     private var elementIndex = 0
 
-    override val serializersModule: SerializersModule = EmptySerializersModule
+    override val serializersModule = SerializersModule {
+        polymorphic(PublicKey::class) {
+            subclass(RSAPublicKeyImpl::class, RSAPublicKeySerializer)
+        }
+    }
 
     override fun decodeBoolean(): Boolean = input.readByte().toInt() != 0
     override fun decodeByte(): Byte = input.readByte()
@@ -154,11 +192,11 @@ inline fun <reified T> test(
 
 fun main() {
     // Generate some public key
-    //val pk = getRSA()
+    val pk = getRSA()
 
     // Simple inclusion of a public key
-    //val u = User(pk)
-    //test(u)
+    val u = User(pk)
+    test(u)
 
     // Inclusion of PublicKey as a generic
     //val gu = GenericUser(pk)
@@ -170,7 +208,7 @@ fun main() {
 
     // testList()
 
-    testML()
+//    testML()
 }
 
 fun getRSA(): PublicKey {
@@ -212,7 +250,7 @@ class PKSurrogate(val kind: KeyKind, val encoded: ByteArray) {
 //     }
 // }
 
-object RSAPublicKeyImplSerde: KSerializer<RSAPublicKeyImpl> {
+object RSAPublicKeyImplSerde : KSerializer<RSAPublicKeyImpl> {
     private val strategy = PKSurrogate.serializer()
     override val descriptor: SerialDescriptor = strategy.descriptor
 
@@ -226,7 +264,7 @@ object RSAPublicKeyImplSerde: KSerializer<RSAPublicKeyImpl> {
     }
 }
 
-object PKSerde: KSerializer<PublicKey> {
+object PKSerde : KSerializer<PublicKey> {
     private val strategy = PKSurrogate.serializer()
     override val descriptor: SerialDescriptor = strategy.descriptor
 
@@ -255,11 +293,11 @@ object ListSerializer : KSerializer<List<Int>> {
     override fun deserialize(decoder: Decoder): List<Int> = listOf(0)
 }
 
-@Serializable(with=ListSerializer::class)
-data class ML(val list: List<Int>)
+@Serializable
+data class ML(@Serializable(with = ListSerializer::class) val list: List<Int>)
 
 fun testML() {
-    val data = ML(listOf(1,2,3))
+    val data = ML(listOf(1, 2, 3))
     val output = ByteArrayOutputStream()
 
     encodeTo(DataOutputStream(output), data)
@@ -285,7 +323,7 @@ data class L(
     val list: List<Int>
     // @Serializable(with = DateAsLongSerializer::class)
     // val stableReleaseDate: Date
-    )
+)
 
 fun testList() {
     val kotlin10ReleaseDate = SimpleDateFormat("yyyy-MM-ddX").parse("2016-02-15+00")
@@ -317,7 +355,7 @@ fun testList() {
     println("Deserialized:\n$obj\n")
 }
 
-class ListSerde: KSerializer<List<Int>> {
+class ListSerde : KSerializer<List<Int>> {
     override val descriptor: SerialDescriptor = buildClassSerialDescriptor("list") {
         element<Int>("total")
         element<Int>("actual")
