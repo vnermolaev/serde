@@ -1,8 +1,11 @@
 // @file:UseSerializers(PublicKeyAsSurrogate::class)
-@file:UseSerializers(PKSerde::class)
+// @file:UseSerializers(ListSerde::class)
+// @file:UseSerializers(RSAPublicKeyImplSerde::class)
 
 import kotlinx.serialization.*
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.descriptors.*
 import kotlinx.serialization.encoding.*
 import kotlinx.serialization.modules.*
@@ -11,18 +14,22 @@ import java.io.*
 import java.security.KeyPairGenerator
 import java.security.PublicKey
 import java.security.SecureRandom
+import java.text.SimpleDateFormat
+import java.util.Date
 
-class DataOutputEncoder(val output: DataOutput) : AbstractEncoder() {
+class LW<T>(val list: List<T>)
+
+class DataOutputEncoder(val output: DataOutput, val totalLength: Int = 10) : AbstractEncoder() {
     private val baSerializer = serializer<ByteArray>()
 
     override val serializersModule: SerializersModule = EmptySerializersModule
     // override val serializersModule: SerializersModule = SerializersModule {
-    //     polymorphic(PublicKey::class) {
-    //         RSAPublicKeyImpl::class with PublicKeyAsSurrogate
+    //     polymorphic(PublicKey::class, PKSerde) {
+    //         subclass(RSAPublicKeyImpl::class, RSAPublicKeyImplSerde)
     //     }
     // }
-        // polymorphic(PublicKey::class, RSAPublicKeyImpl::class, PublicKeyAsSurrogate) //{
-    //         subclass(PublicKeyAsSurrogate)
+    //     polymorphic(PublicKey::class) {
+    //         subclass(RSAPublicKeyImpl::class, RSAPublicKeyImplSerde)
     //     }
     // }
 
@@ -40,6 +47,17 @@ class DataOutputEncoder(val output: DataOutput) : AbstractEncoder() {
     override fun beginCollection(descriptor: SerialDescriptor, collectionSize: Int): CompositeEncoder {
         encodeInt(collectionSize)
         return this
+    }
+
+    override fun <T> encodeSerializableValue(serializer: SerializationStrategy<T>, value: T) {
+        when (value) {
+            is List<*> -> {
+                println("LIST!!!")
+                // encodeSerializableValue()
+            }
+        }
+
+        serializer.serialize(this, value)
     }
 
     override fun encodeNull() = encodeBoolean(false)
@@ -134,22 +152,25 @@ inline fun <reified T> test(
     println("Deserialized:\n$obj\n")
 }
 
-
 fun main() {
     // Generate some public key
-    val pk = getRSA()
+    //val pk = getRSA()
 
     // Simple inclusion of a public key
-    val u = User(pk)
-    test(u)
+    //val u = User(pk)
+    //test(u)
 
     // Inclusion of PublicKey as a generic
-    val gu = GenericUser(pk)
+    //val gu = GenericUser(pk)
     // TODO: this only works with specifying a serde strategy.
     // test(gu, GenericUser.serializer(PKSerde))
     // TODO: explicit typing does not help
     // test<GenericUser<PublicKey>>(gu)
-    test(gu)
+    // test(gu)
+
+    // testList()
+
+    testML()
 }
 
 fun getRSA(): PublicKey {
@@ -170,17 +191,47 @@ class PKSurrogate(val kind: KeyKind, val encoded: ByteArray) {
     }
 }
 
+// object PKSurrogateSerde: KSerializer<PKSurrogate> {
+//     private val baSerializer = serializer<ByteArray>()
+//
+//     override val descriptor: SerialDescriptor = buildClassSerialDescriptor() {
+//         element<PKSurrogate.KeyKind>("")
+//         element<ByteArray>("")
+//     }
+//
+//     override fun deserialize(decoder: Decoder): PKSurrogate {
+//         TODO("Not yet implemented")
+//     }
+//
+//     override fun serialize(encoder: Encoder, value: PKSurrogate) {
+//         encoder.encodeEnum(
+//             PKSurrogate.KeyKind.serializer().descriptor,
+//             value.kind.ordinal
+//         )
+//         baSerializer.serialize(encoder, value.encoded)
+//     }
+// }
+
+object RSAPublicKeyImplSerde: KSerializer<RSAPublicKeyImpl> {
+    private val strategy = PKSurrogate.serializer()
+    override val descriptor: SerialDescriptor = strategy.descriptor
+
+    override fun serialize(encoder: Encoder, value: RSAPublicKeyImpl) {
+        encoder.encodeSerializableValue(strategy, PKSurrogate.RSA(value))
+    }
+
+    override fun deserialize(decoder: Decoder): RSAPublicKeyImpl {
+        val surrogate = decoder.decodeSerializableValue(strategy)
+        return RSAPublicKeyImpl(surrogate.encoded)
+    }
+}
 
 object PKSerde: KSerializer<PublicKey> {
     private val strategy = PKSurrogate.serializer()
     override val descriptor: SerialDescriptor = strategy.descriptor
 
     override fun serialize(encoder: Encoder, value: PublicKey) {
-        val surrogate = when (value) {
-            is RSAPublicKeyImpl -> PKSurrogate.RSA(value)
-            else -> error("sad")
-        }
-        encoder.encodeSerializableValue(strategy, surrogate)
+        encoder.encodeSerializableValue(strategy, PKSurrogate.RSA(value))
     }
 
     override fun deserialize(decoder: Decoder): PublicKey {
@@ -188,5 +239,96 @@ object PKSerde: KSerializer<PublicKey> {
         return when (surrogate.kind) {
             PKSurrogate.KeyKind.RSA -> RSAPublicKeyImpl(surrogate.encoded)
         }
+    }
+}
+
+///
+object DateAsLongSerializer : KSerializer<Date> {
+    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("Date", PrimitiveKind.LONG)
+    override fun serialize(encoder: Encoder, value: Date) = encoder.encodeLong(value.time)
+    override fun deserialize(decoder: Decoder): Date = Date(decoder.decodeLong())
+}
+
+object ListSerializer : KSerializer<List<Int>> {
+    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("Date", PrimitiveKind.LONG)
+    override fun serialize(encoder: Encoder, value: List<Int>) = encoder.encodeInt(value.size)
+    override fun deserialize(decoder: Decoder): List<Int> = listOf(0)
+}
+
+@Serializable(with=ListSerializer::class)
+data class ML(val list: List<Int>)
+
+fun testML() {
+    val data = ML(listOf(1,2,3))
+    val output = ByteArrayOutputStream()
+
+    encodeTo(DataOutputStream(output), data)
+
+    val bytes = output.toByteArray()
+    println("Serialized:\n${bytes.joinToString(",")}\n")
+    // // --------
+    //
+    // val input = ByteArrayInputStream(bytes)
+    //
+    // val obj = if (serde != null) {
+    //     decodeFrom(DataInputStream(input), serde)
+    // } else {
+    //     decodeFrom(DataInputStream(input))
+    // }
+    // println("Deserialized:\n$obj\n")
+}
+
+
+@Serializable
+data class L(
+    // @Serializable(with = ListSerde::class)
+    val list: List<Int>
+    // @Serializable(with = DateAsLongSerializer::class)
+    // val stableReleaseDate: Date
+    )
+
+fun testList() {
+    val kotlin10ReleaseDate = SimpleDateFormat("yyyy-MM-ddX").parse("2016-02-15+00")
+    val serde: KSerializer<L>? = null
+    // val data = L(kotlin10ReleaseDate)
+    val data = L(listOf(1, 2, 3))
+    println("Data:\n$data\n")
+    //--------
+
+    val output = ByteArrayOutputStream()
+
+    if (serde != null) {
+        encodeTo(DataOutputStream(output), serde, data)
+    } else {
+        encodeTo(DataOutputStream(output), data)
+    }
+
+    val bytes = output.toByteArray()
+    println("Serialized:\n${bytes.joinToString(",")}\n")
+    // --------
+
+    val input = ByteArrayInputStream(bytes)
+
+    val obj = if (serde != null) {
+        decodeFrom(DataInputStream(input), serde)
+    } else {
+        decodeFrom(DataInputStream(input))
+    }
+    println("Deserialized:\n$obj\n")
+}
+
+class ListSerde: KSerializer<List<Int>> {
+    override val descriptor: SerialDescriptor = buildClassSerialDescriptor("list") {
+        element<Int>("total")
+        element<Int>("actual")
+        element<ByteArray>("bytes")
+    }
+
+    override fun deserialize(decoder: Decoder): List<Int> {
+        TODO("Not yet implemented")
+    }
+
+    override fun serialize(encoder: Encoder, value: List<Int>) {
+        println("HI")
     }
 }
